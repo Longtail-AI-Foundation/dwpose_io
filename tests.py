@@ -14,8 +14,9 @@ from safetensors.numpy import save_file
 
 import dwpose_io as dw
 from dwpose_io.check import cast_through_float32, check_view_against_legacy, same_bits
+import dwpose_io.readwrite as readwrite
 from dwpose_io.readwrite import METADATA_KEY, sequence_to_tensors, serialize_dw_pose
-from dwpose_io.sequence import TENSOR_NAMES
+from dwpose_io.sequence import PERSON_ARRAY_NAMES, TENSOR_NAMES
 
 
 def make_sequence(counts, seed=0, video_hash='abc123', width=1920, height=1080):
@@ -105,6 +106,99 @@ def test_roundtrip_file():
         path = osp.join(tmp, 'a.safetensors')
         dw.write_dw_pose(seq, path)
         assert_sequences_equal(dw.read_dw_pose(path), seq)
+
+
+def test_read_frame_range_matches_slicing():
+    counts = [1, 0, 3, 2, 0, 0, 6, 1]
+    seq = make_sequence(counts, seed=5)
+    slices = [slice(2, 5), slice(0, 8), slice(0, 100), slice(3, 3), slice(5, 2), slice(-2, None), slice(None, 1),
+              slice(4, 5), slice(1, 2), slice(8, 9), slice(-100, 3), slice(None, None)]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = osp.join(tmp, 'a.safetensors')
+        dw.write_dw_pose(seq, path)
+        whole = dw.read_dw_pose(path)
+        for s in slices:
+            part = dw.read_dw_pose(path, frames=s)
+            assert_sequences_equal(part, whole[s])
+            assert len(part) == len(range(*s.indices(len(counts)))), f'(test_read_frame_range_matches_slicing): {s} gave {len(part)} frames'
+        part = dw.read_dw_pose(path, frames=slice(2, 5))
+        assert len(part) == 3 and part.num_persons == 5 and part.frame_offsets.tolist() == [0, 3, 5, 5]
+        assert part[0]['timestamp'] == whole[2]['timestamp']
+        same_bits('keypoints', part[0]['predictions'][0][1]['keypoints'], whole[2]['predictions'][0][1]['keypoints'], 'frame 2 person 1')
+        expect_assertion(lambda: dw.read_dw_pose(path, frames=slice(0, 6, 2)), 'step')
+        expect_assertion(lambda: dw.read_dw_pose(path, frames=(2, 5)), 'expected slice')
+        empty = osp.join(tmp, 'empty.safetensors')
+        dw.write_dw_pose(make_sequence([]), empty)
+        assert len(dw.read_dw_pose(empty, frames=slice(0, 5))) == 0
+
+
+class RecordingSlice:
+    """Stands in for a safetensors tensor slice and records every range taken."""
+
+    def __init__(self, name, real, log):
+        self.name, self.real, self.log = name, real, log
+
+    def get_shape(self):
+        return self.real.get_shape()
+
+    def __getitem__(self, index):
+        self.log.append((self.name, index.start, index.stop))
+        return self.real[index]
+
+
+class RecordingHandle:
+    """Wraps an open safetensors handle so a test can see which tensors were read
+    whole (get_tensor) and which ranges were sliced (get_slice)."""
+
+    def __init__(self, real, log):
+        self.real, self.log = real, log
+
+    def keys(self):
+        return self.real.keys()
+
+    def metadata(self):
+        return self.real.metadata()
+
+    def get_tensor(self, name):
+        self.log.append((name, 'whole', None))
+        return self.real.get_tensor(name)
+
+    def get_slice(self, name):
+        return RecordingSlice(name, self.real.get_slice(name), self.log)
+
+
+def test_read_frame_range_reads_only_the_range():
+    counts = [1, 0, 3, 2, 0, 0, 6, 1]
+    seq = make_sequence(counts, seed=6)
+    log = []
+    real_safe_open = readwrite.safe_open
+
+    class recording_safe_open:
+        def __init__(self, path, framework):
+            self.ctx = real_safe_open(path, framework=framework)
+
+        def __enter__(self):
+            return RecordingHandle(self.ctx.__enter__(), log)
+
+        def __exit__(self, *args):
+            return self.ctx.__exit__(*args)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = osp.join(tmp, 'a.safetensors')
+        dw.write_dw_pose(seq, path)
+        readwrite.safe_open = recording_safe_open
+        try:
+            part = dw.read_dw_pose(path, frames=slice(2, 5))
+        finally:
+            readwrite.safe_open = real_safe_open
+    assert_sequences_equal(part, seq[2:5])
+    whole_reads = [name for name, kind, _ in log if kind == 'whole']
+    assert whole_reads == [], f'(test_read_frame_range_reads_only_the_range): whole-tensor reads {whole_reads}'
+    ranges = {name: (a, b) for name, a, b in log}
+    assert ranges['frame_offsets'] == (2, 6), f'(test_read_frame_range_reads_only_the_range): frame_offsets range {ranges["frame_offsets"]}'
+    assert ranges['timestamps_ms'] == (2, 5), f'(test_read_frame_range_reads_only_the_range): timestamps range {ranges["timestamps_ms"]}'
+    for name in PERSON_ARRAY_NAMES:
+        assert ranges[name] == (1, 6), f'(test_read_frame_range_reads_only_the_range): {name} range {ranges[name]}, expected persons 1:6'
 
 
 def test_empty_sequence():

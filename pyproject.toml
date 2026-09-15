@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dwpose_io"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reader, writer and checker for the ISL DWPose safetensors format"
 requires-python = ">=3.8"
 dependencies = ["numpy", "safetensors"]
