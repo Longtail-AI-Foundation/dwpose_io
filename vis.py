@@ -38,12 +38,8 @@ def load_st(video_hash):
 
 def category_of(path):
     """Second path component, except that the alphabet_IMG_4651 clips filed
-    under islrtc count as their own category 'alphabet', and paths of the form
-    incoming/<set>/videos/... are the category <set>."""
+    under islrtc count as their own category 'alphabet'."""
     parts = path.split('/')
-    if parts[0] == 'incoming':
-        assert parts[2] == 'videos', f'(category_of): path {path} is not incoming/<set>/videos/...'
-        return parts[1]
     assert parts[0] == 'videos', f'(category_of): path {path} does not start with videos/'
     if parts[1] == 'islrtc' and parts[2] == 'alphabet_IMG_4651':
         return 'alphabet'
